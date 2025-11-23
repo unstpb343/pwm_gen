@@ -1,89 +1,117 @@
-# Generator Semnal PWM - Documentatie Tehnica
+# Generator Semnal PWM – Documentație și Cod Complet
 
-## Introducere
+Acest fișier conține atât documentația pe module, cât și codul Verilog aferent perifericului PWM:
+- `spi_bridge`
+- `instr_dcd`
+- `regs`
+- `counter`
+- `pwm_gen`
+- `top`
 
-Acest proiect reprezinta implementarea in Verilog a unui periferic hardware capabil sa genereze semnale PWM (Pulse Width Modulation). Modulul este proiectat pentru a fi integrat in sisteme embedded si este controlabil printr-o interfata seriala de tip SPI.
+Structura responsabilităților în echipă:
+- **Stan Alexandru Ștefan** – Documentație, `pwm_gen`
+- **Corodeanu Călin Andrei** – `counter`, `spi_bridge`
+- **Șipanu Eduard** – `regs`, `instr_dcd`
 
-Sistemul permite configurarea frecventei (prin perioada si prescaler), a factorului de umplere (duty cycle) si a modului de aliniere a semnalului.
-
-### Arhitectura
-
-Sistemul este compus din 5 module principale conectate in top-level. Fluxul de date porneste de la interfata SPI si ajunge la generatorul de semnal.
-
-![Diagrama Arhitectura](Arhitecture.PNG)
-
----
-
-## Echipa si Responsabilitati
-
-Proiectul a fost realizat in echipa, sarcinile fiind impartite astfel:
-
-* **Pleseanu Ionut-Cristian:** Implementare modulelor de executie: **Counter** si **PWM Generator**.
-* **Lican Stefanita-Ionel-Aurel:** Implementare module **SPI Bridge** si **Instruction Decoder**.
-* **Voicu Alexandru-Iulian:** Implementare modul **Registers**.
 
 ---
 
-## Descrierea Implementarii Modulelor
+## 1. Modulul `spi_bridge`
 
-### 1. SPI Bridge (spi_bridge.v)
-*Responsabil: Lican Stefanita*
+### Descriere
 
-> TODO: Aici trebuie completata descrierea despre detectia de fronturi SCLK si shift register.
+`spi_bridge` implementează logica de recepție și transmisie pentru protocolul SPI în modul slave, cu setările:
+- CPOL = 0
+- CPHA = 0
+- MSB-first
 
-### 2. Instruction Decoder (instr_dcd.v)
-*Responsabil: Lican Stefanita*
+Datele sunt:
+- **citite** de pe linia `MOSI` pe frontul crescător al lui `sclk`,
+- **emise** pe `MISO` pe frontul descrescător.
 
-> TODO: Aici trebuie completata descrierea despre FSM (SETUP/DATA) si decodificarea adreselor.
+La fiecare 8 biți recepționați, se generează un octet valid (`rx_data`, `rx_valid`), transmis mai departe către modulul `instr_dcd`. Pentru transmisie, primește un octet (`tx_data`) și îl deplasează bit cu bit pe `MISO` când `tx_valid` este activ.
 
-### 3. Registers (regs.v)
-*Responsabil: Voicu Alexandru*
+Semnalul `cs_n` (chip select, activ pe 0) delimitează tranzacțiile: la trecerea în 1, intern se resetează contorul de biți.
 
-> TODO: Aici trebuie completata descrierea despre harta memoriei si accesul la registri pe 8 biti vs 16 biti.
+---
 
-### 4. Counter (counter.v)
-*Responsabil: Pleseanu Cristian*
+## 2. Modulul `instr_dcd`
 
-Acest modul reprezinta baza de timp a perifericului. Implementarea a urmarit doua obiective principale: scalarea corecta a timpului si stabilitatea la schimbarea parametrilor.
+### Descriere
 
-**Detalii de implementare:**
+`instr_dcd` (instruction decoder) primește octeții din `spi_bridge` și îi traduce în operații asupra blocului de registre (`regs`).
 
-* **Arhitectura cu Registri Tampon (Active Registers):**
-    Pentru a asigura coerenta datelor, modulul nu utilizeaza direct intrarile de configurare (`period`, `prescale`, `upnotdown`). In schimb, utilizeaza un set de registri interni "active" (`active_period`, `active_prescale`, `active_upnotdown`).
-    Transferul datelor din intrarile utilizatorului in registrii activi se face printr-un mecanism de protectie (`safe_to_update`), care permite actualizarea doar in trei situatii sigure:
-    1.  Cand numaratorul este oprit (`!en`).
-    2.  In modul *Count Up*: Cand numaratorul a ajuns la valoarea `active_period - 1` (exact inainte de resetare).
-    3.  In modul *Count Down*: Cand numaratorul a ajuns la valoarea `1` (exact inainte de a ajunge la 0).
-    Acest mecanism garanteaza ca perioada nu se modifica brusc la mijlocul numaratorii, prevenind blocarea contorului in stari invalide (ex: count > period).
+Protocolul este pe doi octeți:
+- **Byte 1 (setup)**:
+  - bit 7: R/W (1 = write, 0 = read)
+  - bit 6: High/Low (1 = [15:8], 0 = [7:0])
+  - bit 5:0: adresa registrului
+- **Byte 2 (data)**:
+  - la write: valoarea ce se scrie
+  - la read: octet dummy de la master, iar perifericul trimite înapoi `reg_rdata`
 
-* **Sistemul de Prescaler:**
-    Scalarea timpului se realizeaza printr-un contor intern pe 32 de biti (`prescaler_cnt`). Limita de numarare este calculata dinamic folosind operatii pe biti: `1 << active_prescale` (echivalent cu $2^{active\\_prescale}$).
-    Sistemul genereaza un semnal de tip impuls (`tick`) doar cand acest contor intern atinge limita. Numaratorul principal avanseaza doar la aparitia acestui tick, realizand divizarea frecventei in mod sincron.
+Modulul este un FSM cu două stări: `IDLE` (așteaptă setup) și `DATA` (așteaptă byte-ul de date).
 
-* **Logica Principala de Numarare:**
-    Numaratorul functioneaza in intervalul `[0, active_period - 1]`.
-    * **Modul UP:** Incrementeaza pana la `active_period - 1`, apoi revine la 0.
-    * **Modul DOWN:** Decrementeaza pana la 0, apoi sare la `active_period - 1`.
-    * **Safety:** Codul include protectii suplimentare pentru cazul in care perioada este setata la 0, fortand iesirea la 0 pentru a evita comportamente nedefinite.
+---
 
-### 5. PWM Generator (pwm_gen.v)
-*Responsabil: Pleseanu Cristian*
+## 3. Modulul `regs`
 
-Acest modul genereaza efectiv forma de unda pe baza valorii curente a numaratorului si a pragurilor setate (`compare1`, `compare2`).
+### Descriere
 
-**Detalii de implementare:**
+`regs` reprezintă blocul de registre configurabile ale perifericului.  
+Acesta este accesat pe 8 biți (octeți), dar internele pot avea 16 biți. Accesul HIGH/LOW este controlat de `reg_high`.
 
-* **Sincronizarea Actualizarii (Safe Update):**
-    Pentru a evita coruperea formei de unda la modificarea parametrilor in timp real, modulul utilizeaza un semnal `safe_to_update`.
-    Spre deosebire de o abordare simplista care asteapta valoarea 0, acest modul declanseaza actualizarea registrilor tampon (`active_compare`, `active_functions`) exact la finalul perioadei curente: `count_val == active_period - 1`. Aceasta asigura ca noii parametri intra in vigoare instantaneu la primul ciclu de ceas al noii perioade.
+Registrele implementate (conform temei):
+- `PERIOD` – 0x00, 16 biți
+- `COUNTER_EN` – 0x02, 1 bit
+- `COMPARE1` – 0x03, 16 biți
+- `COMPARE2` – 0x05, 16 biți
+- `COUNTER_RESET` – 0x07, 1 bit, write-only (se auto-cleară)
+- `COUNTER_VAL` – 0x08, 16 biți, read-only
+- `PRESCALE` – 0x0A, 8 biți
+- `UPNOTDOWN` – 0x0B, 1 bit
+- `PWM_EN` – 0x0C, 1 bit
+- `FUNCTIONS` – 0x0D, [1:0], restul biților ignorați
 
-* **Logica de "Look-Ahead":**
-    In blocul de generare a semnalului, comparatiile se fac utilizand formula `active_compare - 1`.
-    * *Motivatie:* In logica secventiala sincrona, o decizie luata la frontul de ceas $N$ se propaga la iesire la frontul $N+1$. Prin compararea cu `compare - 1`, comanda de basculare a semnalului este data cu un ciclu in avans, astfel incat tranzitia fizica pe pinul `pwm_out` sa aiba loc exact in momentul in care numaratorul atinge valoarea de prag.
+---
 
-* **Gestionarea Modurilor de Aliniere:**
-    * **Unaligned (Functia 2):** Utilizeaza doua puncte de comutare. Seteaza iesirea pe 1 la `Compare1` si o sterge la `Compare2`.
-    * **Aligned (Functia 0 si 1):** Utilizeaza o logica de tip "Toggle" (`out <= ~out`). Starea initiala (1 pentru Left-Aligned, 0 pentru Right-Aligned) este pre-calculata si fortata in blocul de update, iar tranzitia are loc prin inversarea starii curente la atingerea pragului `Compare1`.
+## 4. Modulul `counter`
 
-* **Prevenirea Starilor Nedefinite:**
-    In momentul actualizarii parametrilor, codul include o logica explicita de initializare a variabilei `out` (0 sau 1 in functie de functia aleasa: Left/Right/Unaligned). Acest lucru elimina riscul ca semnalul sa ramana inversat daca utilizatorul schimba modul de functionare din mers.
+### Descriere
+
+`counter` generează baza de timp, folosind:
+- `period` – limita superioară
+- `prescale` – cât de des se incrementează/decrementează counterul
+- `upnotdown` – direcția de numărare
+- `counter_en` / `counter_reset` – control de start/stop/reset
+
+Valoarea curentă `count_val` este folosită de `pwm_gen` pentru comparații.
+---
+
+## 5. Modulul `pwm_gen`
+
+### Descriere
+
+`pwm_gen` generează semnalul `pwm_out` în funcție de:
+- `count_val`
+- `compare1`, `compare2`
+- `functions`
+- `pwm_en`
+
+Moduri:
+- **FUNCTIONS = 0x00** – aliniat stânga: semnalul începe cu 1 și devine 0 la `compare1`.
+- **FUNCTIONS = 0x01** – aliniat dreapta: semnalul începe cu 0 și devine 1 la `compare1`.
+- **FUNCTIONS = 0x02/0x03** – nealiniat: semnalul este 1 între `compare1` și `compare2`, 0 în rest.
+
+---
+
+## 6. Modulul `top`
+
+### Descriere
+
+`top` leagă toate modulele într-un singur periferic:
+- primește semnalele SPI (`sclk`, `cs_n`, `mosi`, `miso`)
+- primește clock-ul și reset-ul de sistem
+- expune semnalul final `pwm_out`
+
+---
